@@ -1,0 +1,45 @@
+services:
+  vm-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    container_name: vm-monitor-optimized
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./exchange_results:/app/exchange_results:ro
+      - ./data:/app/data
+      - /home/denys/Downloads/ssh_keys_for_host:/app/ssh_keys:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - FLASK_ENV=production
+    restart: unless-stopped
+    mem_limit: 96m
+    cpus: 0.3
+    networks:
+      - vm_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/status', timeout=3)"]
+      interval: 60s
+      timeout: 5s
+      retries: 2
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=5M,noexec,nosuid
+    user: "1000:1000"
+
+networks:
+  vm_network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: vm-monitor-br-v2  # Changed name
