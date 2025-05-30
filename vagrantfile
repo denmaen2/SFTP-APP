@@ -1,0 +1,427 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  # Continue using the box that works well
+  config.vm.box = "hashicorp/bionic64"
+  
+  # Basic SSH configuration - use default insecure key for initial setup
+  config.ssh.insert_key = false  # Prevent Vagrant from replacing insecure key
+  
+  # Define server names and their IPs
+  servers = {
+    "ubuntu-server-1" => "192.168.56.101",
+    "ubuntu-server-2" => "192.168.56.102", 
+    "ubuntu-server-3" => "192.168.56.103"
+  }
+  
+  # Create the servers
+  servers.each do |server_name, ip|
+    config.vm.define server_name do |server|
+      server.vm.hostname = server_name
+      
+      # Set up static private network
+      server.vm.network "private_network", ip: ip
+      
+      # VM Settings
+      server.vm.provider "virtualbox" do |vb|
+        vb.memory = 2048
+        vb.cpus = 1
+        vb.customize ["modifyvm", :id, "--cableconnected1", "on"]
+      end
+      
+      # Basic provisioning for all servers
+      server.vm.provision "shell", inline: <<-SHELL
+        # Configure debconf to handle package installations non-interactively
+        echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+        export DEBIAN_FRONTEND=noninteractive
+        
+        # Preconfigure postfix to avoid interactive prompts
+        echo "postfix postfix/mailname string #{server_name}" | debconf-set-selections
+        echo "postfix postfix/main_mailer_type string 'Local only'" | debconf-set-selections
+        
+        # Update package repositories
+        apt-get update
+        
+        # Install required packages - using -y and DEBIAN_FRONTEND=noninteractive to avoid prompts
+        apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" openssh-server rsync avahi-daemon sshpass rkhunter
+        
+        # Set up password-less sudo for vagrant user
+        echo "vagrant ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/vagrant
+        chmod 0440 /etc/sudoers.d/vagrant
+        
+        # Explicitly set the vagrant user password
+        echo "vagrant:vagrant" | chpasswd
+        
+        # Enable password authentication in SSH
+        sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+        
+        # Configure SFTP server (using internal SFTP subsystem which is more secure)
+        echo "Configuring SFTP server..."
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
+        
+        # Add or update the SFTP configuration
+        if grep -q "Subsystem.*sftp" /etc/ssh/sshd_config; then
+          # Replace the existing sftp subsystem line
+          sed -i 's|^Subsystem.*sftp.*$|Subsystem sftp internal-sftp|' /etc/ssh/sshd_config
+        else
+          # Add the sftp subsystem line if it doesn't exist
+          echo "Subsystem sftp internal-sftp" >> /etc/ssh/sshd_config
+        fi
+        
+        # Restart SSH service to apply changes
+        systemctl restart ssh
+        
+        # Configure hosts file
+        cat > /etc/hosts << EOF
+127.0.0.1 localhost
+127.0.1.1 #{server_name}
+
+# Vagrant environment hosts
+192.168.56.101 ubuntu-server-1
+192.168.56.102 ubuntu-server-2
+192.168.56.103 ubuntu-server-3
+EOF
+        
+        # Create shared directory that all servers can use
+        mkdir -p /vagrant
+        chmod 777 /vagrant
+        
+        # Create local exchange directories with proper permissions
+        mkdir -p /home/vagrant/exchange/sent
+        mkdir -p /home/vagrant/exchange/received
+        chown -R vagrant:vagrant /home/vagrant/exchange
+        chmod -R 775 /home/vagrant/exchange
+        
+        echo "[+] Basic setup completed on #{server_name}"
+      SHELL
+      
+      # Generate ed25519 key on each individual server
+      server.vm.provision "shell", privileged: false, inline: <<-SHELL
+        echo "Generating ed25519 key pair for #{server_name}..."
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q
+        
+        # Create directory in shared folder for keys
+        sudo mkdir -p /vagrant/exchange/ssh_keys
+        sudo chmod 755 /vagrant/exchange/ssh_keys
+        
+        # Copy public key to shared folder
+        cp ~/.ssh/id_ed25519.pub /vagrant/exchange/ssh_keys/#{server_name}.pub
+        echo "Ed25519 key generated for #{server_name} and copied to shared folder"
+      SHELL
+    end
+  end
+  
+  # Final provisioning step for controller server (ubuntu-server-3)
+  config.vm.define "ubuntu-server-3" do |server|
+    # This needs to run after all VMs are set up
+    server.vm.provision "shell", privileged: false, run: "always", inline: <<-SHELL
+      echo "========================================================"
+      echo "    Setting up SSH keys and exchange system              "
+      echo "========================================================"
+      
+      # Create exchange directory structure
+      sudo mkdir -p /vagrant/exchange
+      sudo chmod -R 777 /vagrant/exchange
+      
+      # Ensure local exchange directories exist with proper permissions
+      sudo mkdir -p /home/vagrant/exchange/sent
+      sudo mkdir -p /home/vagrant/exchange/received
+      sudo chown -R vagrant:vagrant /home/vagrant/exchange
+      sudo chmod -R 775 /home/vagrant/exchange
+      
+      # Create directories for RKHunter reports
+      sudo mkdir -p /vagrant/exchange/rkhunter_reports
+      sudo chmod -R 777 /vagrant/exchange/rkhunter_reports
+      
+      # Set up authorized_keys on all servers using Vagrant's synced folder
+      echo "Setting up authorized_keys files on all servers..."
+      
+      # Create a combined authorized_keys file
+      cat /vagrant/exchange/ssh_keys/*.pub > /vagrant/exchange/combined_authorized_keys
+      chmod 644 /vagrant/exchange/combined_authorized_keys
+      
+      # Use the combined file in this server
+      cp /vagrant/exchange/combined_authorized_keys ~/.ssh/authorized_keys
+      chmod 600 ~/.ssh/authorized_keys
+      
+      # Use sshpass for password-based SSH to set up the other servers
+      echo "Configuring authorized_keys on remote servers..."
+      
+      for srv in ubuntu-server-1 ubuntu-server-2; do
+        echo "Setting up $srv..."
+        
+        # Test if password auth works
+        sshpass -p "vagrant" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 vagrant@$srv "echo 'Connected to $srv'" || true
+        
+        # Try to copy the authorized_keys
+        sshpass -p "vagrant" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 vagrant@$srv "
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          cp /vagrant/exchange/combined_authorized_keys ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          echo 'Auth keys installed on $srv'
+        " || echo "⚠️ Could not set up authorized_keys on $srv using SSH"
+      done
+      
+      echo "========================================================"
+      echo "    Installing and running RKHunter on all servers       "
+      echo "========================================================"
+      
+      # Function to run RKHunter on a server
+      run_rkhunter() {
+        local server=$1
+        local ip=$2
+        
+        echo "Running RKHunter scan on $server..."
+        ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@$server "
+          # Create directory for report
+          mkdir -p /vagrant/exchange/rkhunter_reports/$server
+          
+          # Run scan and create simplified report
+          sudo rkhunter --check --skip-keypress --quiet > /vagrant/exchange/rkhunter_reports/$server/full_report.log
+          
+          # Extract important information
+          echo 'RKHunter scan report for $server' > /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo '===========================================' >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo '' >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo 'System Information:' >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo '- Hostname: '\$(hostname) >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo '- Kernel: '\$(uname -r) >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo '- IP Address: $ip' >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo '' >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          echo 'Warnings:' >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+          grep 'Warning:' /vagrant/exchange/rkhunter_reports/$server/full_report.log >> /vagrant/exchange/rkhunter_reports/$server/summary.log || echo 'No warnings found' >> /vagrant/exchange/rkhunter_reports/$server/summary.log
+        "
+      }
+      
+      # Verify that key-based authentication is working
+      echo "Verifying SSH key-based authentication..."
+      for srv in ubuntu-server-1 ubuntu-server-2; do
+        # Test if key-based auth works
+        ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3 vagrant@$srv "echo 'Key-based auth working with $srv'" > /dev/null 2>&1
+        
+        if [ $? -eq 0 ]; then
+          echo "✓ Key-based auth working with $srv"
+        else
+          echo "⚠️ Key-based auth not working with $srv, check SSH configuration"
+        fi
+      done
+      
+      # Run RKHunter on remote servers
+      run_rkhunter "ubuntu-server-1" "192.168.56.101"
+      run_rkhunter "ubuntu-server-2" "192.168.56.102"
+      
+      # Run RKHunter on the local server (ubuntu-server-3)
+      echo "Running RKHunter scan on ubuntu-server-3..."
+      
+      # Create directory for report
+      mkdir -p /vagrant/exchange/rkhunter_reports/ubuntu-server-3
+      
+      # Run scan and create simplified report
+      sudo rkhunter --check --skip-keypress --quiet > /vagrant/exchange/rkhunter_reports/ubuntu-server-3/full_report.log
+      
+      # Extract important information
+      echo 'RKHunter scan report for ubuntu-server-3' > /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo '===========================================' >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo '' >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo 'System Information:' >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo '- Hostname: '$(hostname) >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo '- Kernel: '$(uname -r) >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo '- IP Address: 192.168.56.103' >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo '' >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      echo 'Warnings:' >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      grep 'Warning:' /vagrant/exchange/rkhunter_reports/ubuntu-server-3/full_report.log >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log || echo 'No warnings found' >> /vagrant/exchange/rkhunter_reports/ubuntu-server-3/summary.log
+      
+      # Create consolidated RKHunter report
+      echo "Creating consolidated RKHunter report..."
+      
+      # Create consolidated report file
+      cat > /vagrant/exchange/rkhunter_reports/consolidated_report.txt << EOL
+CONSOLIDATED RKHUNTER REPORT
+===========================
+Generated: $(date)
+
+This report contains a summary of RKHunter findings across all servers.
+All servers were authenticated using ED25519 SSH keys for secure access.
+
+EOL
+      
+      # Add summaries from each server
+      for srv in ubuntu-server-1 ubuntu-server-2 ubuntu-server-3; do
+        echo "SERVER: $srv" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+        echo "--------------------" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+        echo "" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+        
+        if [ -f "/vagrant/exchange/rkhunter_reports/$srv/summary.log" ]; then
+          # Extract and display system information
+          grep -A 3 "System Information:" /vagrant/exchange/rkhunter_reports/$srv/summary.log >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+          echo "" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+          
+          # Count warnings
+          warning_count=$(grep -c "Warning:" /vagrant/exchange/rkhunter_reports/$srv/summary.log || echo 0)
+          echo "Total warnings found: $warning_count" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+          echo "" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+          
+          # Add warnings
+          grep "Warning:" /vagrant/exchange/rkhunter_reports/$srv/summary.log >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt || echo "No warnings found" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+        else
+          echo "No RKHunter report available" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+        fi
+        
+        echo "" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+        echo "" >> /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+      done
+      
+      echo "========================================================"
+      echo "    Testing SFTP document exchange with ED25519 keys     "
+      echo "========================================================"
+      
+      # Create test files
+      echo "Creating test files for SFTP transfer..."
+      timestamp=$(date +%Y%m%d_%H%M%S)
+      testfile="/home/vagrant/exchange/sent/test_file_${timestamp}.txt"
+      
+      # Create test file with some content
+      cat > "$testfile" << EOL
+This is a test file from ubuntu-server-3
+Created at: $(date)
+This file was transferred using SFTP with ED25519 key authentication
+EOL
+      
+      echo "Testing SFTP transfer to remote servers..."
+      for srv in ubuntu-server-1 ubuntu-server-2; do
+        echo "Attempting SFTP transfer to $srv..."
+        
+        # First ensure directory exists on remote server
+        ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@$srv "
+          mkdir -p /home/vagrant/exchange/received
+          chmod -R 775 /home/vagrant/exchange
+        "
+        
+        # Create SFTP batch file
+        sftp_batch="/tmp/sftp_batch_${srv}.txt"
+        cat > "$sftp_batch" << EOL
+cd /home/vagrant/exchange/received
+put $testfile
+bye
+EOL
+        
+        # Execute SFTP transfer with ED25519 key
+        if sftp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no -b "$sftp_batch" vagrant@$srv; then
+          echo "✓ SFTP transfer to $srv successful!"
+        else
+          echo "⚠️ SFTP transfer to $srv failed!"
+        fi
+      done
+      
+      # Verify the transfers
+      echo "Verifying SFTP transfers..."
+      for srv in ubuntu-server-1 ubuntu-server-2; do
+        echo "Checking files on $srv..."
+        
+        # Check if file exists on remote server
+        if ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@$srv "ls -la /home/vagrant/exchange/received/test_file_${timestamp}.txt"; then
+          echo "✓ Test file found on $srv"
+          echo "File content:"
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@$srv "cat /home/vagrant/exchange/received/test_file_${timestamp}.txt"
+          echo ""
+        else
+          echo "⚠️ Test file not found on $srv"
+        fi
+      done
+      
+      # Display reports
+      echo ""
+      echo "==============================================================="
+      echo "                 RKHUNTER SCANS COMPLETED                      "
+      echo "==============================================================="
+      echo ""
+      cat /vagrant/exchange/rkhunter_reports/consolidated_report.txt
+      echo ""
+      echo "All RKHunter reports are available in: /vagrant/exchange/rkhunter_reports/"
+      echo "==============================================================="
+      
+      echo ""
+      echo "==============================================================="
+      echo "                 SFTP FILE EXCHANGE COMPLETED                  "
+      echo "==============================================================="
+      echo ""
+      echo "File exchange test completed using SFTP with ED25519 keys."
+      echo "All exchanged files are available in: /home/vagrant/exchange/received/"
+      echo "==============================================================="
+    SHELL
+# Add this code to the "ubuntu-server-3" VM definition section,
+# after the existing provisioning script (after the last "SHELL" closing tag)
+
+    server.vm.provision "shell", privileged: false, run: "always", inline: <<-EXPORT_ALL_KEYS
+      echo "========================================================"
+      echo "    Exporting SSH keys from ALL VMs to host machine     "
+      echo "========================================================"
+      
+      # Create directory for keys in shared folder
+      sudo mkdir -p /vagrant/ssh_keys_for_host
+      sudo chmod 700 /vagrant/ssh_keys_for_host
+      
+      # Copy keys from this server (ubuntu-server-3)
+      echo "Copying keys from ubuntu-server-3..."
+      cp ~/.ssh/id_ed25519 /vagrant/ssh_keys_for_host/ubuntu-server-3_id_ed25519
+      cp ~/.ssh/id_ed25519.pub /vagrant/ssh_keys_for_host/ubuntu-server-3_id_ed25519.pub
+      chmod 600 /vagrant/ssh_keys_for_host/ubuntu-server-3_id_ed25519
+      chmod 644 /vagrant/ssh_keys_for_host/ubuntu-server-3_id_ed25519.pub
+      
+      # Copy keys from other servers
+      for server in ubuntu-server-1 ubuntu-server-2; do
+        echo "Copying keys from \$server..."
+        
+        # Copy the private key using SSH
+        ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@\$server "cat ~/.ssh/id_ed25519" > /vagrant/ssh_keys_for_host/\${server}_id_ed25519
+        ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no vagrant@\$server "cat ~/.ssh/id_ed25519.pub" > /vagrant/ssh_keys_for_host/\${server}_id_ed25519.pub
+        
+        # Set proper permissions
+        chmod 600 /vagrant/ssh_keys_for_host/\${server}_id_ed25519
+        chmod 644 /vagrant/ssh_keys_for_host/\${server}_id_ed25519.pub
+      done
+      
+      # Create a README file with instructions
+      cat > /vagrant/ssh_keys_for_host/README.txt << README_EOF
+    =========================================================
+    SSH ED25519 KEYS FROM ALL VAGRANT VMs
+    =========================================================
+
+    These keys have been automatically exported from all Vagrant VMs:
+
+    ubuntu-server-1_id_ed25519 - Private key from ubuntu-server-1
+    ubuntu-server-1_id_ed25519.pub - Public key from ubuntu-server-1
+    ubuntu-server-2_id_ed25519 - Private key from ubuntu-server-2
+    ubuntu-server-2_id_ed25519.pub - Public key from ubuntu-server-2
+    ubuntu-server-3_id_ed25519 - Private key from ubuntu-server-3
+    ubuntu-server-3_id_ed25519.pub - Public key from ubuntu-server-3
+
+    To use on Linux/macOS:
+    1. Copy the keys to your ~/.ssh directory:
+       cp *_id_ed25519* ~/.ssh/
+       
+    2. Set proper permissions:
+       chmod 600 ~/.ssh/*_id_ed25519
+       chmod 644 ~/.ssh/*_id_ed25519.pub
+       
+    3. Connect to a VM (example):
+       ssh -i ~/.ssh/ubuntu-server-1_id_ed25519 vagrant@192.168.56.101
+
+    To use on Windows:
+    1. Copy the keys to your .ssh directory in your user profile:
+       copy *_id_ed25519* %USERPROFILE%\\.ssh\\
+       
+    2. Connect using PuTTY or other SSH client pointing to the
+       appropriate private key file
+    README_EOF
+      
+      echo "All keys exported to /vagrant/ssh_keys_for_host/"
+      echo "These files are accessible from your host machine in the Vagrant project directory"
+    EXPORT_ALL_KEYS
+  end
+end
