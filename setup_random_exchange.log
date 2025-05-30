@@ -1,0 +1,103 @@
+Wed May 14 01:07:19 AM UTC 2025: Setting up automated random file exchange between VMs
+Setting up ubuntu-server-1 (192.168.56.101)...
+Copying exchange scripts to ubuntu-server-1...
+Successfully copied scripts to ubuntu-server-1
+Setting up cron job on ubuntu-server-1...
+Running initial exchange on ubuntu-server-1...
+Setting up ubuntu-server-2 (192.168.56.102)...
+Copying exchange scripts to ubuntu-server-2...
+Successfully copied scripts to ubuntu-server-2
+Setting up cron job on ubuntu-server-2...
+Running initial exchange on ubuntu-server-2...
+Setting up ubuntu-server-3 (192.168.56.103)...
+Copying exchange scripts to ubuntu-server-3...
+Successfully copied scripts to ubuntu-server-3
+Setting up cron job on ubuntu-server-3...
+Running initial exchange on ubuntu-server-3...
+Waiting for initial exchanges to complete...
+Retrieving logs and summaries from VMs...
+Retrieving results from ubuntu-server-1 (192.168.56.101)...
+Status for ubuntu-server-1:
+===== File Exchange Status for ubuntu-server-1 =====
+Generated: Wed May 14 01:07:33 UTC 2025
+
+Files Sent: 2
+Files Received: 5
+
+Most Recent Files Sent:
+   
+status_ubuntu-server-1_20250514_010720.txt May 14 01:07
+status_ubuntu-server-1_20250514_010153.txt May 14 01:01
+
+Most Recent Files Received:
+   
+from_ubuntu-server-3_20250514_010726.txt May 14 01:07
+from_ubuntu-server-3_20250514_010159.txt May 14 01:01
+from_ubuntu-server-2_20250514_010156.txt May 14 01:01
+from_host May 14 00:59
+
+Recent Exchange History:
+timestamp            hostname         action  target_servers   file                                        status
+2025-05-14 01:07:21  ubuntu-server-1  sent    ubuntu-server-2  status_ubuntu-server-1_20250514_010720.txt  success
+
+To view detailed logs: less ~/exchange/logs/exchange.log
+To view detailed summary: less ~/exchange/logs/received_summary.txt
+==============================================
+
+Retrieving results from ubuntu-server-2 (192.168.56.102)...
+Status for ubuntu-server-2:
+===== File Exchange Status for ubuntu-server-2 =====
+Generated: Wed May 14 01:07:34 UTC 2025
+
+Files Sent: 2
+Files Received: 5
+
+Most Recent Files Sent:
+   
+status_ubuntu-server-2_20250514_010723.txt May 14 01:07
+status_ubuntu-server-2_20250514_010156.txt May 14 01:01
+
+Most Recent Files Received:
+   
+from_ubuntu-server-1_20250514_010720.txt May 14 01:07
+from_ubuntu-server-3_20250514_010159.txt May 14 01:02
+from_ubuntu-server-1_20250514_010153.txt May 14 01:01
+from_host May 14 00:59
+
+Recent Exchange History:
+timestamp            hostname         action  target_servers   file                                        status
+2025-05-14 01:07:24  ubuntu-server-2  sent    ubuntu-server-3  status_ubuntu-server-2_20250514_010723.txt  success
+
+To view detailed logs: less ~/exchange/logs/exchange.log
+To view detailed summary: less ~/exchange/logs/received_summary.txt
+==============================================
+
+Retrieving results from ubuntu-server-3 (192.168.56.103)...
+Status for ubuntu-server-3:
+===== File Exchange Status for ubuntu-server-3 =====
+Generated: Wed May 14 01:07:35 UTC 2025
+
+Files Sent: 3
+Files Received: 4
+
+Most Recent Files Sent:
+   
+status_ubuntu-server-3_20250514_010726.txt May 14 01:07
+status_ubuntu-server-3_20250514_010159.txt May 14 01:01
+test_file_20250514_005507.txt May 14 00:55
+
+Most Recent Files Received:
+   
+from_ubuntu-server-2_20250514_010723.txt May 14 01:07
+from_ubuntu-server-2_20250514_010156.txt May 14 01:01
+from_ubuntu-server-1_20250514_010153.txt May 14 01:01
+from_host May 14 00:59
+
+Recent Exchange History:
+timestamp            hostname         action  target_servers   file                                        status
+2025-05-14 01:07:26  ubuntu-server-3  sent    ubuntu-server-1  status_ubuntu-server-3_20250514_010726.txt  success
+
+To view detailed logs: less ~/exchange/logs/exchange.log
+To view detailed summary: less ~/exchange/logs/received_summary.txt
+==============================================
+
